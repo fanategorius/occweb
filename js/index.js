@@ -103,6 +103,42 @@
             "SELECT * FROM oc_ldap_user_mapping WHERE owncloud_name = '" + v + "'"
           ].join(';\n') + ';';
         }
+      },
+      'rename-user': {
+        args: ['old_uid', 'new_uid'],
+        description: 'ВНИМАНИЕ: не официальная операция Nextcloud. Переименовывает uid только в основных таблицах ядра — покрывает не всё, требует ручных доп. шагов (см. предупреждение в самом скрипте)',
+        build: function (oldUid, newUid) {
+          var o = escapeSqlString(oldUid);
+          var n = escapeSqlString(newUid);
+          // Предупреждение — только однострочные "--"-комментарии без ";" внутри,
+          // поэтому splitStatements() (парный на бэкенде и здесь) не разобьёт их
+          // как отдельные запросы, а stripLeadingComments() на бэкенде уберёт
+          // этот блок перед определением типа самого первого запроса (SELECT).
+          var warning =
+            "-- WARNING rename is NOT an officially supported Nextcloud operation\n" +
+            "-- This only updates core tables below - it does NOT cover app-specific\n" +
+            "-- tables (Talk, Calendar, Contacts, Mail, two-factor, WebAuthn, etc.)\n" +
+            "-- After running this you must ALSO, with the web server stopped or in\n" +
+            "-- maintenance mode, rename the data directory on disk (data/" + o + " -> data/" + n + ")\n" +
+            "-- and then run: occ files:scan --all\n" +
+            "-- Back up the database first and test on a non-critical account\n";
+          var statements = [
+            "SELECT uid FROM oc_users WHERE uid = '" + o + "'",
+            "SELECT uid FROM oc_users WHERE uid = '" + n + "'",
+            "UPDATE oc_users SET uid = '" + n + "' WHERE uid = '" + o + "'",
+            "UPDATE oc_preferences SET userid = '" + n + "' WHERE userid = '" + o + "'",
+            "UPDATE oc_group_user SET uid = '" + n + "' WHERE uid = '" + o + "'",
+            "UPDATE oc_group_admin SET uid = '" + n + "' WHERE uid = '" + o + "'",
+            "UPDATE oc_ldap_user_mapping SET owncloud_name = '" + n + "' WHERE owncloud_name = '" + o + "'",
+            "UPDATE oc_share SET uid_owner = '" + n + "' WHERE uid_owner = '" + o + "'",
+            "UPDATE oc_share SET uid_initiator = '" + n + "' WHERE uid_initiator = '" + o + "'",
+            "UPDATE oc_share SET share_with = '" + n + "' WHERE share_with = '" + o + "' AND share_type = 0",
+            "UPDATE oc_mounts SET user_id = '" + n + "' WHERE user_id = '" + o + "'",
+            "UPDATE oc_storages SET id = 'home::" + n + "' WHERE id = 'home::" + o + "'",
+            "SELECT uid FROM oc_users WHERE uid = '" + n + "'"
+          ];
+          return warning + statements.join(';\n') + ';';
+        }
       }
     };
 
@@ -218,6 +254,8 @@
       });
       if (response.rolledBack) {
         term.echo('[[;#ff5555;]Batch failed partway through — all statements in this batch were rolled back.]');
+      } else if (response.rollbackFailed) {
+        term.echo('[[;#ff0000;]' + $.terminal.escape_formatting(response.warning || 'Batch failed and the rollback itself failed — earlier statements may have been permanently applied. Check manually.') + ']');
       }
     }
 

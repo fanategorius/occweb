@@ -259,10 +259,30 @@ class DbController extends Controller
         // выполненные в этой же пачке изменения откатываются, а не
         // остаются частично применёнными. SET (без LOCAL) не транзакционен
         // в PostgreSQL, поэтому откат не затрагивает current_setting().
+        //
+        // Про DDL: в PostgreSQL (наша БД) DDL — CREATE/ALTER/DROP TABLE и
+        // т.п. — полностью транзакционен и откатывается вместе с остальными
+        // изменениями пачки, поэтому здесь для Postgres проблемы нет. Но
+        // Nextcloud работает и с MySQL/MariaDB через тот же IDBConnection, а
+        // там DDL делает неявный COMMIT — если эта пачка выполнится на
+        // MySQL-инстансе, commit()/rollBack() после такого DDL получат
+        // исключение "no active transaction". Оборачиваем begin/commit/
+        // rollBack в try/catch, чтобы это не превращалось в необработанное
+        // исключение и HTTP 500 вместо аккуратного JSON-ответа.
         $results = [];
         $rolledBack = false;
+        $rollbackFailed = false;
+        $transactionStarted = false;
 
-        $this->db->beginTransaction();
+        try {
+            $this->db->beginTransaction();
+            $transactionStarted = true;
+        } catch (\Exception $e) {
+            $this->logger->warning('[occweb] beginTransaction() failed, proceeding without an explicit transaction: {error}', [
+                'app' => 'occweb',
+                'error' => $e->getMessage(),
+            ]);
+        }
 
         foreach ($queries as $query) {
             $normalized = $this->stripLeadingComments($query);
@@ -321,20 +341,54 @@ class DbController extends Controller
                 // Откатываем всю пачку и останавливаемся: не продолжаем
                 // выполнять оставшиеся запросы (например, серию DELETE),
                 // если один из предыдущих шагов не выполнился.
-                $this->db->rollBack();
-                $rolledBack = true;
+                if ($transactionStarted) {
+                    try {
+                        $this->db->rollBack();
+                        $rolledBack = true;
+                    } catch (\Exception $rollbackError) {
+                        // Транзакция уже закрыта не нами — например, неявным
+                        // COMMIT-ом от DDL-запроса на MySQL/MariaDB. Всё, что
+                        // выполнилось ДО этой точки в пачке, могло остаться
+                        // применённым навсегда — намеренно НЕ ставим
+                        // rolledBack в true, это было бы неправдой.
+                        $rollbackFailed = true;
+                        $this->logger->warning('[occweb] rollBack() failed after an error — earlier statements in this batch may already be permanently applied: {error}', [
+                            'app' => 'occweb',
+                            'error' => $rollbackError->getMessage(),
+                        ]);
+                    }
+                }
                 break;
             }
         }
 
-        if (!$rolledBack) {
-            $this->db->commit();
+        if (!$rolledBack && !$rollbackFailed && $transactionStarted) {
+            try {
+                $this->db->commit();
+            } catch (\Exception $e) {
+                // Транзакция уже закоммичена неявно (например, DDL-запросом
+                // на MySQL/MariaDB) — эффекты уже сохранены, это не ошибка
+                // выполнения самой пачки.
+                $this->logger->info('[occweb] commit() had nothing to commit (likely auto-committed by a DDL statement): {error}', [
+                    'app' => 'occweb',
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
-        return new JSONResponse([
+        $response = [
             'success' => true,
             'rolledBack' => $rolledBack,
             'results' => $results
-        ]);
+        ];
+
+        if ($rollbackFailed) {
+            $response['rollbackFailed'] = true;
+            $response['warning'] = 'The batch failed partway through and the rollback itself failed (this can happen if an earlier '
+                . 'statement, e.g. a DDL statement, implicitly committed on this database backend). Statements executed before the '
+                . 'failure may have been permanently applied — check the results above and verify manually.';
+        }
+
+        return new JSONResponse($response);
     }
 }

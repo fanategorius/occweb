@@ -68,6 +68,15 @@ you are about to run, ideally against a non-critical row/user first.
 - The application is not a real interactive terminal and does not support long running tasks. 
 So if your instance is pretty big, commands like `occ files:scan` will time out and fail.
 - Do not use `occ maintenance:mode --on`, obvious...
+- The `rename-user` SQL template is **best-effort only**: renaming a Nextcloud
+  username is not an officially supported operation. It updates the core
+  tables it knows about (`oc_users`, `oc_preferences`, `oc_group_user`,
+  `oc_group_admin`, `oc_ldap_user_mapping`, `oc_share`, `oc_mounts`,
+  `oc_storages`), but does **not** touch app-specific tables (Talk, Calendar,
+  Contacts, Mail, two-factor/WebAuthn, etc.). You must also manually rename
+  the user's data directory on disk (`data/<old> -> data/<new>`) with the web
+  server stopped or in maintenance mode, then run `occ files:scan --all`.
+  Back up the database first and test on a non-critical account.
 
 ## Deploying updates
 
