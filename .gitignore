@@ -1,2 +1,34 @@
+# IDE / editor
 .idea
-build
+.vscode
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Build artifacts (see Makefile: build/tools, build/artifacts)
+build/
+
+# PHP dependencies (installed by `make composer` / composer install)
+vendor/
+composer.lock
+
+# JS dependencies / build output, in case any get added later
+node_modules/
+js/node_modules/
+js/vendor/
+js/*.log
+
+# PHPUnit
+.phpunit.result.cache
+.phpunit.cache/
+
+# Local env / secrets
+.env
+*.local
+
+# Misc logs
+*.log
