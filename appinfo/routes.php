@@ -11,6 +11,7 @@ return [
     'routes' => [
 	   ['name' => 'occ#index', 'url' => '/', 'verb' => 'GET'],
 	   ['name' => 'occ#cmd', 'url' => '/cmd', 'verb' => 'POST'],
+	   ['name' => 'db#query', 'url' => '/db/query', 'verb' => 'POST'],
 	   ['name' => 'occ#list', 'url' => '/cmd', 'verb' => 'GET'],
     ]
 ];
