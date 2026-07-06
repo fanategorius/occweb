@@ -16,6 +16,9 @@ class DbController extends Controller
     /** Максимум строк, возвращаемых на один SELECT (защита от OOM/DoS). */
     private const MAX_ROWS = 1000;
 
+    /** Максимальный размер присланного SQL-текста в байтах (защита от OOM/DoS). */
+    private const MAX_SQL_BYTES = 1048576; // 1 MB
+
     /**
      * Конструкции, дающие доступ к файловой системе сервера или запуску
      * внешних программ через SQL. Блокируются полностью, без возможности
@@ -72,32 +75,56 @@ class DbController extends Controller
     }
 
     /**
-     * Разбивает пачку запросов по ";" с учётом одинарных кавычек, чтобы
-     * точка с запятой внутри строкового литерала (в том числе с '' как
-     * экранированной кавычкой) не ломала разбиение.
+     * Убирает ВСЕ однострочные (-- ...) и блочные C-style комментарии
+     * из запроса, включая те, что стоят внутри выражения (например, между
+     * именем функции и открывающей скобкой — иначе так можно спрятать
+     * запрещённую конструкцию от findForbiddenConstruct). Используется
+     * только для проверки на запрещённые конструкции — сам запрос на
+     * выполнение идёт без изменений.
+     */
+    private function removeAllComments($query)
+    {
+        $query = preg_replace('/--[^\n]*/', '', $query);
+        $query = preg_replace('/\/\*[\s\S]*?\*\//', '', $query);
+        return $query;
+    }
+
+    /**
+     * Разбивает пачку запросов по ";" с учётом одинарных и двойных
+     * кавычек (строки и экранированные идентификаторы Postgres), чтобы
+     * точка с запятой внутри 'строки' или "идентификатора" (в том числе
+     * с '' / "" как экранированной кавычкой) не ломала разбиение.
      */
     private function splitStatements($sql)
     {
         $statements = [];
         $current = '';
         $len = strlen($sql);
-        $inString = false;
+        $quoteChar = null;
 
         for ($i = 0; $i < $len; $i++) {
             $ch = $sql[$i];
 
-            if ($ch === "'") {
-                if ($inString && $i + 1 < $len && $sql[$i + 1] === "'") {
-                    $current .= "''";
-                    $i++;
-                    continue;
+            if ($quoteChar !== null) {
+                if ($ch === $quoteChar) {
+                    if ($i + 1 < $len && $sql[$i + 1] === $quoteChar) {
+                        $current .= $quoteChar . $quoteChar;
+                        $i++;
+                        continue;
+                    }
+                    $quoteChar = null;
                 }
-                $inString = !$inString;
                 $current .= $ch;
                 continue;
             }
 
-            if ($ch === ';' && !$inString) {
+            if ($ch === "'" || $ch === '"') {
+                $quoteChar = $ch;
+                $current .= $ch;
+                continue;
+            }
+
+            if ($ch === ';') {
                 $statements[] = trim($current);
                 $current = '';
                 continue;
@@ -118,11 +145,14 @@ class DbController extends Controller
     /**
      * Возвращает описание найденной запрещённой конструкции (доступ к ФС,
      * запуск программ) или null, если запрос безопасен в этом плане.
+     * Проверяется версия запроса без комментариев — иначе конструкцию
+     * можно спрятать, вставив комментарий между именем функции и "(".
      */
     private function findForbiddenConstruct($query)
     {
+        $clean = $this->removeAllComments($query);
         foreach (self::FORBIDDEN_PATTERNS as $pattern => $label) {
-            if (preg_match($pattern, $query)) {
+            if (preg_match($pattern, $clean)) {
                 return $label;
             }
         }
@@ -149,6 +179,13 @@ class DbController extends Controller
 
         if (empty(trim($sql))) {
             return new JSONResponse(['success' => false, 'error' => 'Empty query']);
+        }
+
+        if (strlen($sql) > self::MAX_SQL_BYTES) {
+            return new JSONResponse([
+                'success' => false,
+                'error' => 'Query too large (max ' . self::MAX_SQL_BYTES . ' bytes)'
+            ], 413);
         }
 
         // Аудит: логируем сам факт попытки выполнения ДО всех проверок,
@@ -186,31 +223,53 @@ class DbController extends Controller
             }
         }
 
-        // DELETE необратим, поэтому требуем явное подтверждение с клиента
-        // (confirm=true), прежде чем выполнять хоть один запрос из пачки.
+        // DELETE и UPDATE необратимы (или трудно обратимы), поэтому
+        // требуем явное подтверждение с клиента (confirm=true), прежде
+        // чем выполнять хоть один запрос из пачки.
         $deleteCount = 0;
+        $updateCount = 0;
         foreach ($queries as $query) {
-            if (stripos($this->stripLeadingComments($query), 'DELETE') === 0) {
+            $normalized = $this->stripLeadingComments($query);
+            if (stripos($normalized, 'DELETE') === 0) {
                 $deleteCount++;
+            } elseif (stripos($normalized, 'UPDATE') === 0) {
+                $updateCount++;
             }
         }
 
-        if ($deleteCount > 0 && !$confirmed) {
+        if (($deleteCount > 0 || $updateCount > 0) && !$confirmed) {
+            $parts = [];
+            if ($deleteCount > 0) {
+                $parts[] = "{$deleteCount} DELETE";
+            }
+            if ($updateCount > 0) {
+                $parts[] = "{$updateCount} UPDATE";
+            }
             return new JSONResponse([
                 'success' => false,
                 'requiresConfirmation' => true,
                 'deleteCount' => $deleteCount,
-                'error' => "Batch contains {$deleteCount} DELETE statement(s) and was not executed. Resend with confirm=true to proceed."
+                'updateCount' => $updateCount,
+                'error' => 'Batch contains ' . implode(' and ', $parts) . ' statement(s) and was not executed. Resend with confirm=true to proceed.'
             ]);
         }
 
+        // Пачка выполняется в одной транзакции: если один из запросов
+        // упадёт (например, DELETE на середине серии из-за FK), все уже
+        // выполненные в этой же пачке изменения откатываются, а не
+        // остаются частично применёнными. SET (без LOCAL) не транзакционен
+        // в PostgreSQL, поэтому откат не затрагивает current_setting().
         $results = [];
+        $rolledBack = false;
+
+        $this->db->beginTransaction();
 
         foreach ($queries as $query) {
             $normalized = $this->stripLeadingComments($query);
             $isSelect = stripos($normalized, 'SELECT') === 0;
             $isSet = stripos($normalized, 'SET ') === 0;
             $isDelete = stripos($normalized, 'DELETE') === 0;
+            $isUpdate = stripos($normalized, 'UPDATE') === 0;
 
             try {
                 $stmt = $this->db->prepare($query);
@@ -238,7 +297,15 @@ class DbController extends Controller
                     ];
                 } else {
                     $affected = $stmt->rowCount();
-                    $type = $isSet ? 'set' : ($isDelete ? 'delete' : 'write');
+                    if ($isSet) {
+                        $type = 'set';
+                    } elseif ($isDelete) {
+                        $type = 'delete';
+                    } elseif ($isUpdate) {
+                        $type = 'update';
+                    } else {
+                        $type = 'write';
+                    }
                     $results[] = [
                         'query' => $query,
                         'type' => $type,
@@ -251,13 +318,23 @@ class DbController extends Controller
                     'type' => 'error',
                     'error' => $e->getMessage()
                 ];
-                // Останавливаемся на первой ошибке: не продолжаем выполнять
-                // оставшиеся запросы пачки (например, серию DELETE),
+                // Откатываем всю пачку и останавливаемся: не продолжаем
+                // выполнять оставшиеся запросы (например, серию DELETE),
                 // если один из предыдущих шагов не выполнился.
+                $this->db->rollBack();
+                $rolledBack = true;
                 break;
             }
         }
 
-        return new JSONResponse(['success' => true, 'results' => $results]);
+        if (!$rolledBack) {
+            $this->db->commit();
+        }
+
+        return new JSONResponse([
+            'success' => true,
+            'rolledBack' => $rolledBack,
+            'results' => $results
+        ]);
     }
 }

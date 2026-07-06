@@ -14,26 +14,34 @@
     var OCC_PROMPT = 'occ $ ';
     var SQL_PROMPT = '[[;#ff5555;]sql]# ';
 
-    // Разбивает пачку запросов по ";" с учётом одинарных кавычек (в т.ч. ''
-    // как экранированной кавычки внутри строки), чтобы ";" в строковом
-    // литерале не ломал разбиение. Зеркалит splitStatements() на бэкенде.
+    // Разбивает пачку запросов по ";" с учётом одинарных И двойных кавычек
+    // (в т.ч. '' / "" как экранированной кавычки внутри строки/идентификатора),
+    // чтобы ";" в строковом литерале или "квотированном идентификаторе" не
+    // ломал разбиение. Зеркалит splitStatements() на бэкенде.
     function splitStatements(sql) {
       var statements = [];
       var current = '';
-      var inString = false;
+      var quoteChar = null;
       for (var i = 0; i < sql.length; i++) {
         var ch = sql[i];
-        if (ch === "'") {
-          if (inString && sql[i + 1] === "'") {
-            current += "''";
-            i++;
-            continue;
+        if (quoteChar !== null) {
+          if (ch === quoteChar) {
+            if (sql[i + 1] === quoteChar) {
+              current += quoteChar + quoteChar;
+              i++;
+              continue;
+            }
+            quoteChar = null;
           }
-          inString = !inString;
           current += ch;
           continue;
         }
-        if (ch === ';' && !inString) {
+        if (ch === "'" || ch === '"') {
+          quoteChar = ch;
+          current += ch;
+          continue;
+        }
+        if (ch === ';') {
           statements.push(current.trim());
           current = '';
           continue;
@@ -46,13 +54,13 @@
       return statements.filter(function (s) { return s !== ''; });
     }
 
-    // Быстрая клиентская проверка на DELETE — только для UX (чтобы не
+    // Быстрая клиентская проверка на DELETE/UPDATE — только для UX (чтобы не
     // делать лишний запрос к серверу). Итоговое решение всё равно
     // принимает бэкенд (requiresConfirmation), это лишь подсказка.
-    function scriptHasDelete(sql) {
+    function scriptNeedsConfirmation(sql) {
       return splitStatements(sql).some(function (part) {
         var normalized = part.replace(/^(\s*--[^\n]*\n)*\s*/, '');
-        return /^DELETE\b/i.test(normalized);
+        return /^(DELETE|UPDATE)\b/i.test(normalized);
       });
     }
 
@@ -69,15 +77,17 @@
         args: ['uid'],
         description: 'Полностью удалить локального пользователя (oc_preferences, oc_group_user, oc_ldap_user_mapping, oc_users)',
         build: function (uid) {
+          // Значение подставляется напрямую в каждый запрос (а не через
+          // SET+current_setting) — так скрипт остаётся рабочим, даже если
+          // пользователь скопирует/выполнит только часть строк по отдельности.
           var v = escapeSqlString(uid);
           return [
-            "SET vars.old_user = '" + v + "'",
-            "SELECT * FROM oc_users WHERE uid = current_setting('vars.old_user')",
-            "SELECT * FROM oc_preferences WHERE userid = current_setting('vars.old_user')",
-            "DELETE FROM oc_preferences WHERE userid = current_setting('vars.old_user')",
-            "DELETE FROM oc_group_user WHERE uid = current_setting('vars.old_user')",
-            "DELETE FROM oc_ldap_user_mapping WHERE owncloud_name = current_setting('vars.old_user')",
-            "DELETE FROM oc_users WHERE uid = current_setting('vars.old_user')"
+            "SELECT * FROM oc_users WHERE uid = '" + v + "'",
+            "SELECT * FROM oc_preferences WHERE userid = '" + v + "'",
+            "DELETE FROM oc_preferences WHERE userid = '" + v + "'",
+            "DELETE FROM oc_group_user WHERE uid = '" + v + "'",
+            "DELETE FROM oc_ldap_user_mapping WHERE owncloud_name = '" + v + "'",
+            "DELETE FROM oc_users WHERE uid = '" + v + "'"
           ].join(';\n') + ';';
         }
       },
@@ -87,11 +97,10 @@
         build: function (uid) {
           var v = escapeSqlString(uid);
           return [
-            "SET vars.old_user = '" + v + "'",
-            "SELECT * FROM oc_users WHERE uid = current_setting('vars.old_user')",
-            "SELECT * FROM oc_preferences WHERE userid = current_setting('vars.old_user')",
-            "SELECT * FROM oc_group_user WHERE uid = current_setting('vars.old_user')",
-            "SELECT * FROM oc_ldap_user_mapping WHERE owncloud_name = current_setting('vars.old_user')"
+            "SELECT * FROM oc_users WHERE uid = '" + v + "'",
+            "SELECT * FROM oc_preferences WHERE userid = '" + v + "'",
+            "SELECT * FROM oc_group_user WHERE uid = '" + v + "'",
+            "SELECT * FROM oc_ldap_user_mapping WHERE owncloud_name = '" + v + "'"
           ].join(';\n') + ';';
         }
       }
@@ -133,7 +142,9 @@
 
       function formatCell(v) {
         if (v === null || v === undefined) {
-          return '';
+          // Явная метка, а не пустая строка — иначе NULL неотличим от
+          // настоящей пустой строки '' в выводе таблицы.
+          return '[NULL]';
         }
         if (typeof v === 'object') {
           return JSON.stringify(v);
@@ -199,10 +210,15 @@
           term.echo('[[;green;]  OK (session variable set)]');
         } else if (r.type === 'delete') {
           term.echo('[[;#ff9900;]  DELETED ' + r.affected_rows + ' row(s)]');
+        } else if (r.type === 'update') {
+          term.echo('[[;#ff9900;]  UPDATED ' + r.affected_rows + ' row(s)]');
         } else {
           term.echo('[[;green;]  OK, ' + r.affected_rows + ' row(s) affected]');
         }
       });
+      if (response.rolledBack) {
+        term.echo('[[;#ff5555;]Batch failed partway through — all statements in this batch were rolled back.]');
+      }
     }
 
     function enterSqlMode(term) {
@@ -219,12 +235,18 @@
       term.echo('[[;yellow;]Switched back to OCC mode.]');
     }
 
+    // Таймаут для больших/долгих пачек (например, DELETE по большой таблице
+    // без индекса): без него зависший запрос молча оставит терминал
+    // заблокированным (term.pause()) навсегда, если сервер не ответит.
+    var SQL_REQUEST_TIMEOUT_MS = 120000;
+
     function sendSqlQuery(term, sql, confirmed) {
       term.pause();
       $.ajax({
         url: baseUrl + '/db/query',
         type: 'POST',
         contentType: 'application/json',
+        timeout: SQL_REQUEST_TIMEOUT_MS,
         data: JSON.stringify({ sql: sql, confirm: !!confirmed })
       }).done(function (response) {
         if (response && response.requiresConfirmation) {
@@ -234,14 +256,18 @@
         }
         renderSqlResponse(term, response);
         term.resume();
-      }).fail(function (xhr) {
-        term.echo('[[;#ff5555;]Request failed: ]' + $.terminal.escape_formatting(xhr.status + ' ' + xhr.statusText));
+      }).fail(function (xhr, status) {
+        if (status === 'timeout') {
+          term.echo('[[;#ff5555;]Request timed out after ' + (SQL_REQUEST_TIMEOUT_MS / 1000) + 's — the query may still be running on the server, check occ/DB logs before retrying.]');
+        } else {
+          term.echo('[[;#ff5555;]Request failed: ]' + $.terminal.escape_formatting(xhr.status + ' ' + xhr.statusText));
+        }
         term.resume();
       });
     }
 
     function askDeleteConfirmation(term, sql, message) {
-      var prompt = '[[;#ff5555;]' + (message || 'This script contains DELETE statement(s).') + ' Type "yes" to run it: ]';
+      var prompt = '[[;#ff5555;]' + (message || 'This script contains DELETE/UPDATE statement(s).') + ' Type "yes" to run it: ]';
       term.read(prompt).then(function (answer) {
         if ((answer || '').trim().toLowerCase() === 'yes') {
           sendSqlQuery(term, sql, true);
@@ -282,7 +308,7 @@
           if (!trimmed) {
             return;
           }
-          if (scriptHasDelete(command)) {
+          if (scriptNeedsConfirmation(command)) {
             askDeleteConfirmation(term, command);
           } else {
             sendSqlQuery(term, command, false);
