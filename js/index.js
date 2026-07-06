@@ -14,11 +14,43 @@
     var OCC_PROMPT = 'occ $ ';
     var SQL_PROMPT = '[[;#ff5555;]sql]# ';
 
+    // Разбивает пачку запросов по ";" с учётом одинарных кавычек (в т.ч. ''
+    // как экранированной кавычки внутри строки), чтобы ";" в строковом
+    // литерале не ломал разбиение. Зеркалит splitStatements() на бэкенде.
+    function splitStatements(sql) {
+      var statements = [];
+      var current = '';
+      var inString = false;
+      for (var i = 0; i < sql.length; i++) {
+        var ch = sql[i];
+        if (ch === "'") {
+          if (inString && sql[i + 1] === "'") {
+            current += "''";
+            i++;
+            continue;
+          }
+          inString = !inString;
+          current += ch;
+          continue;
+        }
+        if (ch === ';' && !inString) {
+          statements.push(current.trim());
+          current = '';
+          continue;
+        }
+        current += ch;
+      }
+      if (current.trim() !== '') {
+        statements.push(current.trim());
+      }
+      return statements.filter(function (s) { return s !== ''; });
+    }
+
     // Быстрая клиентская проверка на DELETE — только для UX (чтобы не
     // делать лишний запрос к серверу). Итоговое решение всё равно
     // принимает бэкенд (requiresConfirmation), это лишь подсказка.
     function scriptHasDelete(sql) {
-      return sql.split(';').some(function (part) {
+      return splitStatements(sql).some(function (part) {
         var normalized = part.replace(/^(\s*--[^\n]*\n)*\s*/, '');
         return /^DELETE\b/i.test(normalized);
       });
@@ -159,6 +191,9 @@
           term.echo('[[;gray;]  ' + r.count + ' row(s)]');
           if (r.count > 0) {
             renderTable(term, r.data);
+          }
+          if (r.truncated) {
+            term.echo('[[;yellow;]  Result truncated — showing only the first ' + r.count + ' rows, add LIMIT to see more precisely.]');
           }
         } else if (r.type === 'set') {
           term.echo('[[;green;]  OK (session variable set)]');
