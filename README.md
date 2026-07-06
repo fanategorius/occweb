@@ -35,5 +35,18 @@ you are about to run, ideally against a non-critical row/user first.
 So if your instance is pretty big, commands like `occ files:scan` will time out and fail.
 - Do not use `occ maintenance:mode --on`, obvious...
 
+## Deploying updates
+
+After pulling/copying new code into `nextcloud/apps/occweb/`, restart PHP so
+the changes actually take effect. `occ app:disable`/`app:enable` is **not**
+enough — it does not clear PHP's opcode cache, so a stale, cached version of
+the code can keep running (routes silently 404ing is a typical symptom).
+Restart the PHP process itself, for example:
+
+```bash
+sudo systemctl restart php8.3-fpm   # adjust to your installed PHP version
+sudo systemctl restart apache2      # if PHP runs as an Apache module instead
+```
+
 ## TODOs:
 See [open issues](https://github.com/Adphi/occweb/issues)
