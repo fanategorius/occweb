@@ -14,7 +14,27 @@ As nextcloudd has no native support for asynchronous operations, due to the use 
 
 ## Install
 
-Place this app in **nextcloud/apps/**
+No build step required (plain PHP + vanilla JS). Clone straight into the
+target server's `apps/` directory and enable it:
+
+```bash
+cd /var/www/nextcloud/apps
+git clone https://github.com/fanategorius/occweb.git
+chown -R www-data:www-data occweb   # match your web server user
+sudo -u www-data php /var/www/nextcloud/occ app:enable occweb
+```
+
+`occ app:enable` takes care of registering the app's version correctly, so
+none of the "Deploying updates" caveats below apply to a fresh install —
+they only matter once the app is already enabled and you're updating it in
+place.
+
+Before installing, check your Nextcloud version against the range in
+`appinfo/info.xml` (`dependencies/nextcloud`, currently `min-version`/
+`max-version`) — `occ app:enable` refuses to enable an app outside that
+range. If you're offline or without GitHub access, build a tarball instead
+with `make dist` (uses the included Makefile) and extract it into `apps/`
+on the target server.
 
 ## SQL query mode
 
@@ -47,6 +67,24 @@ Restart the PHP process itself, for example:
 sudo systemctl restart php8.3-fpm   # adjust to your installed PHP version
 sudo systemctl restart apache2      # if PHP runs as an Apache module instead
 ```
+
+### If you bump the `<version>` in `appinfo/info.xml`
+
+Nextcloud tracks each app's installed version in its database (`installed_version`
+in `oc_appconfig`) separately from the `<version>` in `info.xml`. If you edit
+files in place (copy/`git pull`) instead of going through the app store or
+`occ upgrade`, those two get out of sync — Nextcloud then treats the whole
+instance as "needs upgrade" and blocks most `occ` commands behind the
+CLI-upgrade wizard, even though nothing about Nextcloud core actually
+changed. After bumping the version, sync it manually:
+
+```bash
+sudo -u www-data php /var/www/nextcloud/occ config:app:set occweb installed_version --value="X.Y.Z"
+```
+
+(use the same `X.Y.Z` as the new `<version>`), then restart PHP as above.
+This does not apply on a fresh `occ app:enable` install — that command sets
+`installed_version` correctly on its own.
 
 ## TODOs:
 See [open issues](https://github.com/Adphi/occweb/issues)

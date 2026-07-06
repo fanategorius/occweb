@@ -22,7 +22,26 @@ websockets), а отсутствие настоящей асинхронност
 
 ## Установка
 
-Поместите это приложение в **nextcloud/apps/**
+Сборка не нужна (чистый PHP + vanilla JS). Клонируйте прямо в `apps/`
+целевого сервера и включите приложение:
+
+```bash
+cd /var/www/nextcloud/apps
+git clone https://github.com/fanategorius/occweb.git
+chown -R www-data:www-data occweb   # укажите вашего пользователя веб-сервера
+sudo -u www-data php /var/www/nextcloud/occ app:enable occweb
+```
+
+`occ app:enable` сам корректно проставит версию приложения в базе, поэтому
+оговорки из раздела «Обновление кода на сервере» ниже к свежей установке не
+относятся — они актуальны только когда приложение уже включено и вы
+обновляете его на месте.
+
+Перед установкой сверьте версию вашего Nextcloud с диапазоном в
+`appinfo/info.xml` (`dependencies/nextcloud`, `min-version`/`max-version`)
+— `occ app:enable` откажется включать приложение вне этого диапазона. Если
+нет доступа к GitHub — соберите tar.gz через `make dist` (есть готовый
+Makefile) и распакуйте его в `apps/` на целевом сервере.
 
 ## Режим SQL-запросов
 
@@ -60,6 +79,24 @@ opcode-кэш PHP, из-за чего может продолжать работ
 sudo systemctl restart php8.3-fpm   # укажите свою версию PHP
 sudo systemctl restart apache2      # если PHP работает как модуль Apache
 ```
+
+### Если меняете `<version>` в `appinfo/info.xml`
+
+Nextcloud хранит установленную версию каждого приложения в базе
+(`installed_version` в `oc_appconfig`) отдельно от `<version>` в
+`info.xml`. Если вы правите файлы на месте (копированием/`git pull`), а не
+через App Store или `occ upgrade`, эти два значения расходятся — и
+Nextcloud считает, что «инстансу нужен апгрейд», блокируя большинство
+`occ`-команд за CLI-визардом обновления, хотя само ядро Nextcloud никак не
+менялось. После бампа версии синхронизируйте её вручную:
+
+```bash
+sudo -u www-data php /var/www/nextcloud/occ config:app:set occweb installed_version --value="X.Y.Z"
+```
+
+(то же значение `X.Y.Z`, что и в новом `<version>`), затем перезапустите
+PHP, как описано выше. На свежую установку через `occ app:enable` это не
+распространяется — там версия проставляется корректно автоматически.
 
 ## Планы (TODO):
 См. [открытые issues](https://github.com/Adphi/occweb/issues)
