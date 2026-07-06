@@ -1,92 +1,101 @@
-(function(OC, window, $, undefined) {
-'use strict';
+<?php
 
-$(document).ready(function() {
-    var sqlMode = false;
-    
-    var term = $('body').terminal(function(command, term) {
-        if (command === '') {
-            return;
+namespace OCA\OCCWeb\Controller;
+
+use OCP\AppFramework\Controller;
+use OCP\IRequest;
+use OCP\IDBConnection;
+use OCP\AppFramework\Http\JSONResponse;
+use OCP\IGroupManager;
+use OCP\IUserSession;
+
+class DbController extends Controller
+{
+    private $db;
+    private $groupManager;
+    private $userSession;
+
+    public function __construct(
+        $AppName, 
+        IRequest $request, 
+        IDBConnection $db,
+        IGroupManager $groupManager,
+        IUserSession $userSession
+    ) {
+        parent::__construct($AppName, $request);
+        $this->db = $db;
+        $this->groupManager = $groupManager;
+        $this->userSession = $userSession;
+    }
+
+    /**
+     * @NoCSRFRequired
+     */
+    public function query()
+    {
+        // Проверка прав администратора
+        $user = $this->userSession->getUser();
+        if (!$user) {
+            return new JSONResponse(['error' => 'Not authenticated'], 401);
         }
         
-        // Команды переключения режимов
-        if (command === ':sql') {
-            sqlMode = true;
-            term.set_prompt('sql $ ');
-            term.echo('SQL mode enabled. Type :occ to return to OCC mode.');
-            return;
+        if (!$this->groupManager->isAdmin($user->getUID())) {
+            return new JSONResponse(['error' => 'Admin privileges required'], 403);
         }
-        
-        if (command === ':occ') {
-            sqlMode = false;
-            term.set_prompt('occ $ ');
-            term.echo('OCC mode enabled.');
-            return;
+
+        $sql = $this->request->getParam('sql', '');
+
+        if (empty(trim($sql))) {
+            return new JSONResponse(['success' => false, 'error' => 'Empty query']);
         }
-        
-        if (command === ':help') {
-            term.echo('Available commands:');
-            term.echo('  :sql  - Switch to SQL mode');
-            term.echo('  :occ  - Switch to OCC mode');
-            term.echo('  :help - Show this help');
-            term.echo('');
-            term.echo('In OCC mode: execute Nextcloud occ commands');
-            term.echo('In SQL mode: execute SQL queries directly');
-            return;
-        }
-        
-        term.pause();
-        
-        if (sqlMode) {
-            // SQL режим
-            $.post(OC.generateUrl('/apps/occweb/db/query'), {
-                sql: command
-            }, function(response) {
-                if (response.success) {
-                    response.results.forEach(function(result) {
-                        if (result.type === 'select') {
-                            term.echo('Query: ' + result.query);
-                            term.echo('Rows: ' + result.count);
-                            if (result.data.length > 0) {
-                                term.echo(JSON.stringify(result.data, null, 2));
-                            } else {
-                                term.echo('(no results)');
-                            }
-                        } else if (result.type === 'write') {
-                            term.echo('Query: ' + result.query);
-                            term.echo('Affected rows: ' + result.affected_rows);
-                        } else if (result.type === 'set') {
-                            term.echo('Skipped: ' + result.query);
-                        }
-                        term.echo('');
-                    });
+
+        // Разделяем запросы по точке с запятой. Все запросы выполняются
+        // последовательно на одном и том же соединении с БД (в рамках
+        // одного HTTP-запроса), поэтому SET сохраняет своё значение
+        // для current_setting() в последующих запросах пачки.
+        $queries = array_values(array_filter(array_map('trim', explode(';', $sql)), function ($q) {
+            return $q !== '';
+        }));
+
+        $results = [];
+
+        foreach ($queries as $query) {
+            $isSelect = stripos($query, 'SELECT') === 0;
+            $isSet = stripos($query, 'SET ') === 0;
+
+            try {
+                $stmt = $this->db->prepare($query);
+                $stmt->execute();
+
+                if ($isSelect) {
+                    $rows = $stmt->fetchAll();
+                    $results[] = [
+                        'query' => $query,
+                        'type' => 'select',
+                        'count' => count($rows),
+                        'data' => $rows
+                    ];
                 } else {
-                    term.echo('ERROR: ' + response.error);
+                    $affected = $stmt->rowCount();
+                    $results[] = [
+                        'query' => $query,
+                        'type' => $isSet ? 'set' : 'write',
+                        'affected_rows' => $affected
+                    ];
                 }
-                term.resume();
-            }).fail(function(xhr, status, error) {
-                term.echo('ERROR: Request failed - ' + error);
-                term.resume();
-            });
-        } else {
-            // OCC режим
-            $.post(OC.generateUrl('/apps/occweb/cmd'), {
-                command: command
-            }, function(response) {
-                term.echo('\n' + response).resume();
-            }).fail(function(xhr, status, error) {
-                term.echo('ERROR: Request failed - ' + error);
-                term.resume();
-            });
+            } catch (\Exception $e) {
+                $results[] = [
+                    'query' => $query,
+                    'type' => 'error',
+                    'error' => $e->getMessage()
+                ];
+                // Останавливаемся на первой ошибке: не продолжаем выполнять
+                // оставшиеся запросы пачки (например, серию DELETE),
+                // если один из предыдущих шагов не выполнился.
+                break;
+            }
         }
-    }, {
-        prompt: 'occ $ ',
-        name: 'occweb',
-        greetings: 'Nextcloud OCC Web Terminal\nType :help for available commands\n',
-        onBlur: function() {
-            return false;
-        }
-    });
-});
 
-})(OC, window, jQuery);
+        return new JSONResponse(['success' => true, 'results' => $results]);
+    }
+}
