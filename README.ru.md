@@ -23,13 +23,23 @@ websockets), а отсутствие настоящей асинхронност
 ## Установка
 
 Сборка не нужна (чистый PHP + vanilla JS). Клонируйте прямо в `apps/`
-целевого сервера и включите приложение:
+целевого сервера и запустите установочный скрипт:
 
 ```bash
 cd /var/www/nextcloud/apps
 git clone https://github.com/fanategorius/occweb.git
-chown -R www-data:www-data occweb   # укажите вашего пользователя веб-сервера
-sudo -u www-data php /var/www/nextcloud/occ app:enable occweb
+bash occweb/install.sh
+```
+
+`install.sh` удаляет dev/CI-файлы, не нужные для работающей установки
+(`tests/`, `.travis.yml`, `phpunit*.xml`, `composer.json`, `composer.lock`,
+`Makefile`), выставляет `chown -R` на пользователя веб-сервера и выполняет
+`occ app:enable`. По умолчанию считает, что Nextcloud лежит в
+`/var/www/nextcloud`, а пользователь веб-сервера — `www-data`; если у вас
+иначе, передайте своими аргументами:
+
+```bash
+bash occweb/install.sh /path/to/nextcloud custom-web-user
 ```
 
 `occ app:enable` сам корректно проставит версию приложения в базе, поэтому
@@ -39,9 +49,13 @@ sudo -u www-data php /var/www/nextcloud/occ app:enable occweb
 
 Перед установкой сверьте версию вашего Nextcloud с диапазоном в
 `appinfo/info.xml` (`dependencies/nextcloud`, `min-version`/`max-version`)
-— `occ app:enable` откажется включать приложение вне этого диапазона. Если
-нет доступа к GitHub — соберите tar.gz через `make dist` (есть готовый
-Makefile) и распакуйте его в `apps/` на целевом сервере.
+— `occ app:enable` откажется включать приложение вне этого диапазона.
+
+Учтите: `install.sh` удаляет файлы, отслеживаемые в git. Если планируете
+дальше обновлять эту установку через `git pull`, а не пере-клонированием —
+имейте в виду, что будущее изменение одного из удалённых файлов в апстриме
+может привести к отказу `git pull` смёржить изменения. Git сам сообщит об
+этом, и файл можно вернуть командой `git checkout -- <file>`.
 
 ## Режим SQL-запросов
 

@@ -15,13 +15,23 @@ As nextcloudd has no native support for asynchronous operations, due to the use 
 ## Install
 
 No build step required (plain PHP + vanilla JS). Clone straight into the
-target server's `apps/` directory and enable it:
+target server's `apps/` directory and run the install script:
 
 ```bash
 cd /var/www/nextcloud/apps
 git clone https://github.com/fanategorius/occweb.git
-chown -R www-data:www-data occweb   # match your web server user
-sudo -u www-data php /var/www/nextcloud/occ app:enable occweb
+bash occweb/install.sh
+```
+
+`install.sh` removes the dev/CI-only files that don't belong in a running
+install (`tests/`, `.travis.yml`, `phpunit*.xml`, `composer.json`,
+`composer.lock`, `Makefile`), `chown -R`s the app directory to the web
+server user, and runs `occ app:enable`. It assumes Nextcloud lives at
+`/var/www/nextcloud` and the web server user is `www-data`; pass different
+values as arguments if that's not the case:
+
+```bash
+bash occweb/install.sh /path/to/nextcloud custom-web-user
 ```
 
 `occ app:enable` takes care of registering the app's version correctly, so
@@ -32,9 +42,13 @@ place.
 Before installing, check your Nextcloud version against the range in
 `appinfo/info.xml` (`dependencies/nextcloud`, currently `min-version`/
 `max-version`) — `occ app:enable` refuses to enable an app outside that
-range. If you're offline or without GitHub access, build a tarball instead
-with `make dist` (uses the included Makefile) and extract it into `apps/`
-on the target server.
+range.
+
+Note: `install.sh` deletes files that are tracked in git. If you plan to
+keep this install up to date with `git pull` instead of re-cloning, be
+aware that a future upstream change to one of the removed files could make
+a plain `git pull` refuse to merge — it will tell you so, and you can
+`git checkout -- <file>` to recover it if that happens.
 
 ## SQL query mode
 
