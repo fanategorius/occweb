@@ -29,6 +29,20 @@ class DbController extends Controller
     }
 
     /**
+     * Убирает ведущие однострочные комментарии ("-- ...") перед запросом.
+     * После разбиения пачки по ";" такой комментарий может "приклеиться"
+     * к следующему запросу и помешать определить его тип (SELECT/SET/DELETE).
+     */
+    private function stripLeadingComments($query)
+    {
+        $query = ltrim($query);
+        while (preg_match('/^--[^\n]*\n/', $query)) {
+            $query = ltrim(preg_replace('/^--[^\n]*\n/', '', $query, 1));
+        }
+        return $query;
+    }
+
+    /**
      * @NoCSRFRequired
      */
     public function query()
@@ -38,12 +52,13 @@ class DbController extends Controller
         if (!$user) {
             return new JSONResponse(['error' => 'Not authenticated'], 401);
         }
-        
+
         if (!$this->groupManager->isAdmin($user->getUID())) {
             return new JSONResponse(['error' => 'Admin privileges required'], 403);
         }
 
         $sql = $this->request->getParam('sql', '');
+        $confirmed = filter_var($this->request->getParam('confirm', false), FILTER_VALIDATE_BOOLEAN);
 
         if (empty(trim($sql))) {
             return new JSONResponse(['success' => false, 'error' => 'Empty query']);
@@ -57,11 +72,31 @@ class DbController extends Controller
             return $q !== '';
         }));
 
+        // DELETE необратим, поэтому требуем явное подтверждение с клиента
+        // (confirm=true), прежде чем выполнять хоть один запрос из пачки.
+        $deleteCount = 0;
+        foreach ($queries as $query) {
+            if (stripos($this->stripLeadingComments($query), 'DELETE') === 0) {
+                $deleteCount++;
+            }
+        }
+
+        if ($deleteCount > 0 && !$confirmed) {
+            return new JSONResponse([
+                'success' => false,
+                'requiresConfirmation' => true,
+                'deleteCount' => $deleteCount,
+                'error' => "Batch contains {$deleteCount} DELETE statement(s) and was not executed. Resend with confirm=true to proceed."
+            ]);
+        }
+
         $results = [];
 
         foreach ($queries as $query) {
-            $isSelect = stripos($query, 'SELECT') === 0;
-            $isSet = stripos($query, 'SET ') === 0;
+            $normalized = $this->stripLeadingComments($query);
+            $isSelect = stripos($normalized, 'SELECT') === 0;
+            $isSet = stripos($normalized, 'SET ') === 0;
+            $isDelete = stripos($normalized, 'DELETE') === 0;
 
             try {
                 $stmt = $this->db->prepare($query);
@@ -77,9 +112,10 @@ class DbController extends Controller
                     ];
                 } else {
                     $affected = $stmt->rowCount();
+                    $type = $isSet ? 'set' : ($isDelete ? 'delete' : 'write');
                     $results[] = [
                         'query' => $query,
-                        'type' => $isSet ? 'set' : 'write',
+                        'type' => $type,
                         'affected_rows' => $affected
                     ];
                 }

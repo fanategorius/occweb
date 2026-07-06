@@ -14,6 +14,16 @@
     var OCC_PROMPT = 'occ $ ';
     var SQL_PROMPT = '[[;#ff5555;]sql]# ';
 
+    // Быстрая клиентская проверка на DELETE — только для UX (чтобы не
+    // делать лишний запрос к серверу). Итоговое решение всё равно
+    // принимает бэкенд (requiresConfirmation), это лишь подсказка.
+    function scriptHasDelete(sql) {
+      return sql.split(';').some(function (part) {
+        var normalized = part.replace(/^(\s*--[^\n]*\n)*\s*/, '');
+        return /^DELETE\b/i.test(normalized);
+      });
+    }
+
     function renderSqlResponse(term, response) {
       if (!response) {
         term.echo('[[;#ff5555;]Empty response from server]');
@@ -39,6 +49,8 @@
           }
         } else if (r.type === 'set') {
           term.echo('[[;green;]  OK (session variable set)]');
+        } else if (r.type === 'delete') {
+          term.echo('[[;#ff9900;]  DELETED ' + r.affected_rows + ' row(s)]');
         } else {
           term.echo('[[;green;]  OK, ' + r.affected_rows + ' row(s) affected]');
         }
@@ -56,6 +68,40 @@
       mode = 'occ';
       term.set_prompt(OCC_PROMPT);
       term.echo('[[;yellow;]Switched back to OCC mode.]');
+    }
+
+    function sendSqlQuery(term, sql, confirmed) {
+      term.pause();
+      $.ajax({
+        url: baseUrl + '/db/query',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ sql: sql, confirm: !!confirmed })
+      }).done(function (response) {
+        if (response && response.requiresConfirmation) {
+          term.resume();
+          askDeleteConfirmation(term, sql, response.error);
+          return;
+        }
+        renderSqlResponse(term, response);
+        term.resume();
+      }).fail(function (xhr) {
+        term.echo('[[;#ff5555;]Request failed: ]' + $.terminal.escape_formatting(xhr.status + ' ' + xhr.statusText));
+        term.resume();
+      });
+    }
+
+    function askDeleteConfirmation(term, sql, message) {
+      var prompt = '[[;#ff5555;]' + (message || 'This script contains DELETE statement(s).') + ' Type "yes" to run it: ]';
+      term.read(prompt).then(function (answer) {
+        if ((answer || '').trim().toLowerCase() === 'yes') {
+          sendSqlQuery(term, sql, true);
+        } else {
+          term.echo('[[;yellow;]Cancelled — nothing was executed.]');
+        }
+      }, function () {
+        term.echo('[[;yellow;]Cancelled — nothing was executed.]');
+      });
     }
 
     $.get(baseUrl + '/cmd', function(response){
@@ -78,19 +124,11 @@
           if (!trimmed) {
             return;
           }
-          term.pause();
-          $.ajax({
-            url: baseUrl + '/db/query',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ sql: command })
-          }).done(function (response) {
-            renderSqlResponse(term, response);
-            term.resume();
-          }).fail(function (xhr) {
-            term.echo('[[;#ff5555;]Request failed: ]' + $.terminal.escape_formatting(xhr.status + ' ' + xhr.statusText));
-            term.resume();
-          });
+          if (scriptHasDelete(command)) {
+            askDeleteConfirmation(term, command);
+          } else {
+            sendSqlQuery(term, command, false);
+          }
           return;
         }
 
