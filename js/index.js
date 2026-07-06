@@ -24,6 +24,119 @@
       });
     }
 
+    function escapeSqlString(value) {
+      return String(value).replace(/'/g, "''");
+    }
+
+    // Готовые шаблоны SQL-скриптов. build() возвращает текст скрипта,
+    // который вставляется в командную строку через term.set_command() —
+    // ничего не выполняется автоматически, пользователь сам проверяет
+    // и жмёт Enter (после чего срабатывает обычное подтверждение DELETE).
+    var TEMPLATES = {
+      'delete-user': {
+        args: ['uid'],
+        description: 'Полностью удалить локального пользователя (oc_preferences, oc_group_user, oc_ldap_user_mapping, oc_users)',
+        build: function (uid) {
+          var v = escapeSqlString(uid);
+          return [
+            "SET vars.old_user = '" + v + "'",
+            "SELECT * FROM oc_users WHERE uid = current_setting('vars.old_user')",
+            "SELECT * FROM oc_preferences WHERE userid = current_setting('vars.old_user')",
+            "DELETE FROM oc_preferences WHERE userid = current_setting('vars.old_user')",
+            "DELETE FROM oc_group_user WHERE uid = current_setting('vars.old_user')",
+            "DELETE FROM oc_ldap_user_mapping WHERE owncloud_name = current_setting('vars.old_user')",
+            "DELETE FROM oc_users WHERE uid = current_setting('vars.old_user')"
+          ].join(';\n') + ';';
+        }
+      },
+      'list-user': {
+        args: ['uid'],
+        description: 'Только посмотреть данные пользователя, без удаления (oc_users, oc_preferences, oc_group_user, oc_ldap_user_mapping)',
+        build: function (uid) {
+          var v = escapeSqlString(uid);
+          return [
+            "SET vars.old_user = '" + v + "'",
+            "SELECT * FROM oc_users WHERE uid = current_setting('vars.old_user')",
+            "SELECT * FROM oc_preferences WHERE userid = current_setting('vars.old_user')",
+            "SELECT * FROM oc_group_user WHERE uid = current_setting('vars.old_user')",
+            "SELECT * FROM oc_ldap_user_mapping WHERE owncloud_name = current_setting('vars.old_user')"
+          ].join(';\n') + ';';
+        }
+      }
+    };
+
+    function listTemplates(term) {
+      term.echo('[[;yellow;]Available templates:]');
+      Object.keys(TEMPLATES).forEach(function (name) {
+        var t = TEMPLATES[name];
+        var usage = name + ' ' + t.args.map(function (a) { return '<' + a + '>'; }).join(' ');
+        term.echo('[[;#009ae3;]  template ' + usage + ']');
+        term.echo('    ' + t.description);
+      });
+      term.echo('[[;gray;]Fills the command line — review it, then press Enter to run.]');
+    }
+
+    function useTemplate(term, name, args) {
+      var t = TEMPLATES[name];
+      if (!t) {
+        term.echo('[[;#ff5555;]Unknown template: ]' + $.terminal.escape_formatting(name || '') + '. Type "templates" to list available ones.');
+        return;
+      }
+      if (args.length < t.args.length) {
+        var usage = name + ' ' + t.args.map(function (a) { return '<' + a + '>'; }).join(' ');
+        term.echo('[[;#ff5555;]Missing arguments. Usage: ]template ' + usage);
+        return;
+      }
+      var sql = t.build.apply(null, args);
+      term.set_command(sql);
+      term.echo('[[;yellow;]Template inserted into the command line — review it, then press Enter to run.]');
+    }
+
+    // Табличный вывод результатов SELECT в стиле psql.
+    function renderTable(term, rows) {
+      if (!rows || !rows.length) {
+        return;
+      }
+      var columns = Object.keys(rows[0]);
+
+      function formatCell(v) {
+        if (v === null || v === undefined) {
+          return '';
+        }
+        if (typeof v === 'object') {
+          return JSON.stringify(v);
+        }
+        return String(v).replace(/\r?\n/g, '\\n');
+      }
+
+      function pad(str, width) {
+        str = String(str);
+        var diff = width - str.length;
+        return diff > 0 ? str + new Array(diff + 1).join(' ') : str;
+      }
+
+      var widths = columns.map(function (col) {
+        return rows.reduce(function (max, row) {
+          return Math.max(max, formatCell(row[col]).length);
+        }, col.length);
+      });
+
+      function formatRow(cells) {
+        return cells.map(function (cell, i) {
+          return ' ' + pad(cell, widths[i]) + ' ';
+        }).join('|');
+      }
+
+      var lines = [];
+      lines.push(formatRow(columns));
+      lines.push(widths.map(function (w) { return new Array(w + 3).join('-'); }).join('+'));
+      rows.forEach(function (row) {
+        lines.push(formatRow(columns.map(function (col) { return formatCell(row[col]); })));
+      });
+
+      term.echo($.terminal.escape_formatting(lines.join('\n')));
+    }
+
     function renderSqlResponse(term, response) {
       if (!response) {
         term.echo('[[;#ff5555;]Empty response from server]');
@@ -45,7 +158,7 @@
         } else if (r.type === 'select') {
           term.echo('[[;gray;]  ' + r.count + ' row(s)]');
           if (r.count > 0) {
-            term.echo($.terminal.escape_formatting(JSON.stringify(r.data, null, 2)));
+            renderTable(term, r.data);
           }
         } else if (r.type === 'set') {
           term.echo('[[;green;]  OK (session variable set)]');
@@ -62,6 +175,7 @@
       term.set_prompt(SQL_PROMPT);
       term.echo('[[;yellow;]Switched to SQL mode. Admin only — statements run directly against the database.]');
       term.echo('[[;gray;]Separate statements with ";". Shift+Enter for a new line, Enter to run. Type "occ" to go back.]');
+      term.echo('[[;gray;]Type "templates" to list ready-made scripts (e.g. deleting a user).]');
     }
 
     function exitSqlMode(term) {
@@ -119,6 +233,15 @@
           if (trimmed === 'exit') {
             exitSqlMode(term);
             term.reset();
+            return;
+          }
+          if (trimmed === 'templates') {
+            listTemplates(term);
+            return;
+          }
+          if (/^template(\s|$)/i.test(trimmed)) {
+            var parts = trimmed.split(/\s+/);
+            useTemplate(term, parts[1], parts.slice(2));
             return;
           }
           if (!trimmed) {
