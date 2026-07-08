@@ -9,6 +9,7 @@ use OC\MemoryInfo;
 use OCP\IRequest;
 use OCP\AppFramework\Http\TemplateResponse;
 use OCP\AppFramework\Http\DataResponse;
+use OCP\AppFramework\Http\JSONResponse;
 use OCP\AppFramework\Controller;
 use Symfony\Component\Console\Input\StringInput;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -47,11 +48,28 @@ class OccController extends Controller
     $this->symphonyApplication = $reflectionProperty->getValue($this->application);
   }
 
+  private function requireAdmin(): ?JSONResponse
+  {
+    // Services via OC::$server zodat de constructor-signatuur ongewijzigd blijft
+    // en NC's DI-container (zonder application.php) de class kan resolven.
+    $userSession = OC::$server->get(\OCP\IUserSession::class);
+    $user = $userSession->getUser();
+    if ($user === null) {
+      return new JSONResponse(['error' => 'Not authenticated'], 401);
+    }
+    $groupManager = OC::$server->get(\OCP\IGroupManager::class);
+    if (!$groupManager->isAdmin($user->getUID())) {
+      return new JSONResponse(['error' => 'Admin privileges required'], 403);
+    }
+    return null;
+  }
+
   /**
    * @NoCSRFRequired
    */
   public function index()
   {
+    if ($err = $this->requireAdmin()) return $err;
     return new TemplateResponse('occweb', 'index');
   }
 
@@ -76,6 +94,7 @@ class OccController extends Controller
    */
   public function cmd($command)
   {
+    if ($err = $this->requireAdmin()) return $err;
     $this->logger->debug($command);
     $input = new StringInput($command);
     $response = $this->run($input);
@@ -84,6 +103,7 @@ class OccController extends Controller
   }
 
   public function list() {
+    if ($err = $this->requireAdmin()) return $err;
     $defs = $this->symphonyApplication->all();
     $cmds = array();
     foreach ($defs as $d) {
